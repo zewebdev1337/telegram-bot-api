@@ -420,6 +420,7 @@ class Client::JsonUser final : public td::Jsonable {
       object("can_read_all_group_messages", td::JsonBool(user_info->can_read_all_group_messages));
       object("supports_inline_queries", td::JsonBool(user_info->is_inline_bot));
       object("can_connect_to_business", td::JsonBool(user_info->can_connect_to_business));
+      object("has_main_web_app", td::JsonBool(user_info->has_main_web_app));
     }
   }
 
@@ -3285,6 +3286,8 @@ void Client::JsonMessage::store(td::JsonValueScope *scope) const {
       object("refunded_payment", JsonRefundedPayment(content));
       break;
     }
+    case td_api::messageGiftedStars::ID:
+      break;
     default:
       UNREACHABLE();
   }
@@ -4085,7 +4088,7 @@ class Client::JsonStarTransactionPartner final : public td::Jsonable {
       case td_api::starTransactionPartnerBot::ID: {
         auto source_user = static_cast<const td_api::starTransactionPartnerBot *>(source_);
         object("type", "user");
-        object("user", JsonUser(source_user->bot_user_id_, client_));
+        object("user", JsonUser(source_user->user_id_, client_));
         if (!source_user->invoice_payload_.empty()) {
           if (!td::check_utf8(source_user->invoice_payload_)) {
             LOG(WARNING) << "Receive non-UTF-8 invoice payload";
@@ -4102,6 +4105,7 @@ class Client::JsonStarTransactionPartner final : public td::Jsonable {
       case td_api::starTransactionPartnerTelegram::ID:
       case td_api::starTransactionPartnerAppStore::ID:
       case td_api::starTransactionPartnerGooglePlay::ID:
+      case td_api::starTransactionPartnerUser::ID:
       case td_api::starTransactionPartnerChannel::ID:
         LOG(ERROR) << "Receive " << to_string(*source_);
         object("type", "other");
@@ -11299,10 +11303,21 @@ td::Status Client::process_set_chat_description_query(PromisedQueryPtr &query) {
 }
 
 td::Status Client::process_pin_chat_message_query(PromisedQueryPtr &query) {
+  auto business_connection_id = query->arg("business_connection_id");
   auto chat_id = query->arg("chat_id");
   auto message_id = get_message_id(query.get());
   auto disable_notification = to_bool(query->arg("disable_notification"));
 
+  if (!business_connection_id.empty()) {
+    check_business_connection_chat_id(
+        business_connection_id.str(), chat_id.str(), std::move(query),
+        [this, message_id](const BusinessConnection *business_connection, int64 chat_id, PromisedQueryPtr query) {
+          send_request(
+              make_object<td_api::setBusinessMessageIsPinned>(business_connection->id_, chat_id, message_id, true),
+              td::make_unique<TdOnOkQueryCallback>(std::move(query)));
+        });
+    return td::Status::OK();
+  }
   check_message(chat_id, message_id, false, AccessRights::Write, "message to pin", std::move(query),
                 [this, disable_notification](int64 chat_id, int64 message_id, PromisedQueryPtr query) {
                   send_request(make_object<td_api::pinChatMessage>(chat_id, message_id, disable_notification, false),
@@ -11312,8 +11327,20 @@ td::Status Client::process_pin_chat_message_query(PromisedQueryPtr &query) {
 }
 
 td::Status Client::process_unpin_chat_message_query(PromisedQueryPtr &query) {
+  auto business_connection_id = query->arg("business_connection_id");
   auto chat_id = query->arg("chat_id");
   auto message_id = get_message_id(query.get());
+
+  if (!business_connection_id.empty()) {
+    check_business_connection_chat_id(
+        business_connection_id.str(), chat_id.str(), std::move(query),
+        [this, message_id](const BusinessConnection *business_connection, int64 chat_id, PromisedQueryPtr query) {
+          send_request(
+              make_object<td_api::setBusinessMessageIsPinned>(business_connection->id_, chat_id, message_id, false),
+              td::make_unique<TdOnOkQueryCallback>(std::move(query)));
+        });
+    return td::Status::OK();
+  }
 
   if (message_id == 0) {
     check_chat(chat_id, AccessRights::Write, std::move(query), [this](int64 chat_id, PromisedQueryPtr query) {
@@ -12832,6 +12859,7 @@ void Client::add_user(UserInfo *user_info, object_ptr<td_api::user> &&user) {
       user_info->can_read_all_group_messages = bot->can_read_all_group_messages_;
       user_info->is_inline_bot = bot->is_inline_;
       user_info->can_connect_to_business = bot->can_connect_to_business_;
+      user_info->has_main_web_app = bot->has_main_web_app_;
       break;
     }
     case td_api::userTypeDeleted::ID:
@@ -13777,6 +13805,8 @@ bool Client::need_skip_update_message(int64 chat_id, const object_ptr<td_api::me
     case td_api::messageSuggestProfilePhoto::ID:
       return true;
     case td_api::messagePremiumGiftCode::ID:
+      return true;
+    case td_api::messageGiftedStars::ID:
       return true;
     default:
       break;
